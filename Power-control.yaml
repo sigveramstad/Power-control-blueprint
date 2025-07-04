@@ -1,0 +1,68 @@
+blueprint:
+  name: Nordpool – turn on at highest price + max off hours
+  description: >
+    Slår enhet på i et valgt antall dyreste timer.
+    Tvinger på hvis av-tid overstiger grensene.
+  domain: automation
+  input:
+    grid_area:
+      name: Grid area sensor
+      description: Nordpool-prisenheten
+      selector:
+        entity:
+          domain: sensor
+          integration: nordpool
+    expensive_hours:
+      name: Dyr-timer å være på
+      description: Antall dyreste timer per dag enheten skal være på
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 24
+          step: 1
+    max_off_hours:
+      name: Maks antall timer av
+      description: Maks sammenhengende timer av før enheten tvinges på
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 1
+    turn_on_action:
+      name: Turn on
+      selector:
+        action: {}
+    turn_off_action:
+      name: Turn off
+      selector:
+        action: {}
+variables:
+  ga: !input grid_area
+  eh: !input expensive_hours
+  mo: !input max_off_hours
+trigger:
+  - platform: time_pattern
+    hours: "*"
+action:
+  - variables:
+      prices: "{{ state_attr(ga, 'today') | list }}"
+      sorted: "{{ prices | sort(reverse=true) }}"
+      cutoff: "{{ sorted[eh - 1] if eh > 0 else float('inf') }}"
+      current: "{{ prices[now().hour] }}"
+      last_off: "{{ state_attr(automation.id, 'last_triggered') }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{
+                (current >= cutoff)
+                or
+                (
+                  (now() - last_off).total_seconds() / 3600 >= mo
+                )
+              }}
+        sequence: !input turn_on_action
+        default: !input turn_off_action
+mode: single
