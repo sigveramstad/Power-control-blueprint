@@ -28,7 +28,7 @@ blueprint:
           max: 24
     force_on_flag:
       name: Input boolean for tvangs-PÅ-status
-      description: Bruk en input_boolean for å holde styr på om tvangs-PÅ er aktiv.
+      description: En input_boolean som viser om tvangs-PÅ er aktiv (må lages i Home Assistant)
       selector:
         entity:
           domain: input_boolean
@@ -54,17 +54,25 @@ trigger:
 
 action:
   - variables:
-      prices: "{{ state_attr(ga, 'today') + state_attr(ga, 'tomorrow') if state_attr(ga, 'tomorrow') else state_attr(ga, 'today') }}"
+      prices: >
+        {% set today = state_attr(ga, 'today') %}
+        {% set tomorrow = state_attr(ga, 'tomorrow') %}
+        {{ (today + tomorrow) if tomorrow else today }}
       sorted: "{{ prices | sort(reverse=true) }}"
       cutoff: "{{ sorted[eh - 1] if eh <= sorted | length else 0 }}"
       current_price: "{{ prices[now().hour] }}"
       force_active: "{{ is_state(force_flag, 'on') }}"
-      last_off: "{{ state_attr(this.entity_id, 'last_triggered') }}"
-      last_on_time: "{{ state_attr(force_flag, 'last_changed') }}"
-      time_since_on: "{{ (now() - last_on_time).total_seconds() / 3600 if last_on_time else 0 }}"
-      time_since_trigger: "{{ (now() - last_off).total_seconds() / 3600 if last_off else 0 }}"
-      trigger_force: "{{ time_since_trigger >= mo }}"
-
+      last_trigger: "{{ state_attr(this.entity_id, 'last_triggered') }}"
+      hours_since_trigger: >
+        {% if last_trigger %}
+          {{ (as_timestamp(now()) - as_timestamp(last_trigger)) / 3600 }}
+        {% else %}
+          999
+        {% endif %}
+      trigger_force: "{{ hours_since_trigger >= mo }}"
+      force_flag_last_changed: >
+        {% set changed = states[force_flag].last_changed %}
+        {{ (as_timestamp(now()) - as_timestamp(changed)) / 3600 if changed else 999 }}
   - choose:
       - conditions:
           - condition: template
@@ -81,7 +89,7 @@ action:
         sequence:
           - !input turn_on_action
           - condition: template
-            value_template: "{{ time_since_on >= 1 }}"
+            value_template: "{{ force_flag_last_changed >= 1 }}"
           - service: input_boolean.turn_off
             target:
               entity_id: !input force_on_flag
@@ -89,8 +97,10 @@ action:
       - conditions:
           - condition: template
             value_template: "{{ current_price >= cutoff }}"
-        sequence: !input turn_on_action
+        sequence:
+          - !input turn_on_action
 
-    default: !input turn_off_action
+    default:
+      - !input turn_off_action
 
 mode: single
