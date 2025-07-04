@@ -1,68 +1,96 @@
 blueprint:
-  name: Nordpool – turn on at highest price + max off hours
+  name: Nordpool – slå på ved høy pris + maks av timer
   description: >
-    Slår enhet på i et valgt antall dyreste timer.
-    Tvinger på hvis av-tid overstiger grensene.
+    Slår en enhet PÅ i et valgt antall dyreste timer i døgnet (basert på Nordpool-pris).
+    Dersom enheten har vært AV i mer enn X timer, tvinges den på i én time,
+    før normal styring gjenopptas.
   domain: automation
   input:
     grid_area:
-      name: Grid area sensor
-      description: Nordpool-prisenheten
+      name: Nordpool sensor
+      description: Sensor med Nordpool-priser (f.eks. sensor.nordpool_xx)
       selector:
         entity:
           domain: sensor
-          integration: nordpool
     expensive_hours:
-      name: Dyr-timer å være på
-      description: Antall dyreste timer per dag enheten skal være på
+      name: Dyreste timer å være PÅ
       default: 3
       selector:
         number:
-          min: 0
+          min: 1
           max: 24
-          step: 1
     max_off_hours:
-      name: Maks antall timer av
-      description: Maks sammenhengende timer av før enheten tvinges på
+      name: Maks antall sammenhengende timer AV
       default: 6
       selector:
         number:
           min: 1
           max: 24
-          step: 1
+    force_on_flag:
+      name: Input boolean for tvangs-PÅ-status
+      description: Bruk en input_boolean for å holde styr på om tvangs-PÅ er aktiv.
+      selector:
+        entity:
+          domain: input_boolean
     turn_on_action:
-      name: Turn on
+      name: Handling for å slå på enheten
       selector:
         action: {}
     turn_off_action:
-      name: Turn off
+      name: Handling for å slå av enheten
       selector:
         action: {}
+
 variables:
   ga: !input grid_area
   eh: !input expensive_hours
   mo: !input max_off_hours
+  force_flag: !input force_on_flag
+
 trigger:
   - platform: time_pattern
-    hours: "*"
+    minutes: 0
+    seconds: 0
+
 action:
   - variables:
-      prices: "{{ state_attr(ga, 'today') | list }}"
+      prices: "{{ state_attr(ga, 'today') + state_attr(ga, 'tomorrow') if state_attr(ga, 'tomorrow') else state_attr(ga, 'today') }}"
       sorted: "{{ prices | sort(reverse=true) }}"
-      cutoff: "{{ sorted[eh - 1] if eh > 0 else float('inf') }}"
-      current: "{{ prices[now().hour] }}"
-      last_off: "{{ state_attr(automation.id, 'last_triggered') }}"
+      cutoff: "{{ sorted[eh - 1] if eh <= sorted | length else 0 }}"
+      current_price: "{{ prices[now().hour] }}"
+      force_active: "{{ is_state(force_flag, 'on') }}"
+      last_off: "{{ state_attr(this.entity_id, 'last_triggered') }}"
+      last_on_time: "{{ state_attr(force_flag, 'last_changed') }}"
+      time_since_on: "{{ (now() - last_on_time).total_seconds() / 3600 if last_on_time else 0 }}"
+      time_since_trigger: "{{ (now() - last_off).total_seconds() / 3600 if last_off else 0 }}"
+      trigger_force: "{{ time_since_trigger >= mo }}"
+
   - choose:
       - conditions:
           - condition: template
-            value_template: >
-              {{
-                (current >= cutoff)
-                or
-                (
-                  (now() - last_off).total_seconds() / 3600 >= mo
-                )
-              }}
+            value_template: "{{ trigger_force and not force_active }}"
+        sequence:
+          - service: input_boolean.turn_on
+            target:
+              entity_id: !input force_on_flag
+          - !input turn_on_action
+
+      - conditions:
+          - condition: template
+            value_template: "{{ force_active }}"
+        sequence:
+          - !input turn_on_action
+          - condition: template
+            value_template: "{{ time_since_on >= 1 }}"
+          - service: input_boolean.turn_off
+            target:
+              entity_id: !input force_on_flag
+
+      - conditions:
+          - condition: template
+            value_template: "{{ current_price >= cutoff }}"
         sequence: !input turn_on_action
-        default: !input turn_off_action
+
+    default: !input turn_off_action
+
 mode: single
