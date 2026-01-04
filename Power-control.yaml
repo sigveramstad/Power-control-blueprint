@@ -59,9 +59,15 @@ action:
         {% endfor %}
         {{ out }}
 
+      sorted_hours: >
+        {{ priced_hours | sort(attribute=1, reverse=true) }}
+
       expensive_hours_idx: >
-        {{ priced_hours | sort(attribute=1, reverse=true)[:eh]
-           | map(attribute=0) | list }}
+        {% set top = [] %}
+        {% for h in sorted_hours[:eh] %}
+          {% set top = top + [h[0]] %}
+        {% endfor %}
+        {{ top }}
 
       is_expensive: "{{ now().hour in expensive_hours_idx }}"
 
@@ -73,6 +79,13 @@ action:
           0
         {% else %}
           {{ (as_timestamp(now()) - as_timestamp(states[target].last_changed)) / 3600 }}
+        {% endif %}
+
+      force_elapsed: >
+        {% if force_active %}
+          {{ (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) }}
+        {% else %}
+          0
         {% endif %}
 
   - choose:
@@ -89,12 +102,10 @@ action:
             target:
               entity_id: !input target_entity
 
-      # 🔥 Tvangs-PÅ aktiv (i maks 1 time)
+      # 🔥 Tvangs-PÅ aktiv (maks 1 time)
       - conditions:
           - condition: template
-            value_template: >
-              {{ force_active and
-                 (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) < 3600 }}
+            value_template: "{{ force_active and force_elapsed < 3600 }}"
         sequence:
           - service: switch.turn_on
             target:
@@ -114,13 +125,11 @@ action:
         target:
           entity_id: !input target_entity
 
-  # 🔁 Slå av tvangs-PÅ etter 1 time
+  # 🔁 Avslutt tvangs-PÅ etter 1 time
   - choose:
       - conditions:
           - condition: template
-            value_template: >
-              {{ force_active and
-                 (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) >= 3600 }}
+            value_template: "{{ force_active and force_elapsed >= 3600 }}"
         sequence:
           - service: input_boolean.turn_off
             target:
