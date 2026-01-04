@@ -1,102 +1,127 @@
 blueprint:
-  name: Nordpool – slå på ved høy pris + maks av timer
+  name: Nordpool – varmtvann dyreste timer + maks AV-tid
   description: >
-    Slår en enhet PÅ i et valgt antall dyreste timer i døgnet (basert på Nordpool-pris).
-    Dersom enheten har vært AV i mer enn X timer, tvinges den på i én time,
-    før normal styring gjenopptas.
+    Slår varmtvannstank PÅ i et valgt antall av de dyreste timene i døgnet
+    basert på Nordpool-priser. Hvis tanken har vært AV i mer enn X timer,
+    tvinges den PÅ i 1 time før normal prisstyring gjenopptas.
   domain: automation
+
   input:
-    grid_area:
-      name: Nordpool sensor
-      description: Sensor med Nordpool-priser (f.eks. sensor.nordpool_xx)
+    nordpool_sensor:
+      name: Nordpool-prissensor
       selector:
         entity:
           domain: sensor
-    expensive_hours:
-      name: Dyreste timer å være PÅ
-      default: 3
-      selector:
-        number:
-          min: 1
-          max: 24
-    max_off_hours:
-      name: Maks antall sammenhengende timer AV
-      default: 6
-      selector:
-        number:
-          min: 1
-          max: 24
-    force_on_flag:
-      name: Input boolean for tvangs-PÅ-status
-      description: En input_boolean som viser om tvangs-PÅ er aktiv (må lages i Home Assistant)
+
+    target_entity:
+      name: Enhet som styres (varmtvann)
       selector:
         entity:
-          domain: input_boolean
+
+    expensive_hours:
+      name: Antall dyreste timer per døgn
+      default: 4
+      selector:
+        number:
+          min: 1
+          max: 24
+
+    max_off_hours:
+      name: Maks sammenhengende timer AV
+      description: >
+        Hvis enheten har vært AV lenger enn dette,
+        tvinges den PÅ i 1 time.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 24
+
     turn_on_action:
-      name: Handling for å slå på enheten
+      name: Handling for å slå PÅ
       selector:
         action: {}
+
     turn_off_action:
-      name: Handling for å slå av enheten
+      name: Handling for å slå AV
       selector:
         action: {}
 
 variables:
-  ga: !input grid_area
+  ga: !input nordpool_sensor
+  target: !input target_entity
   eh: !input expensive_hours
   mo: !input max_off_hours
-  force_flag: !input force_on_flag
+  force_flag: input_boolean.nordpool_force_hotwater
 
 trigger:
   - platform: time_pattern
-    minutes: 0
-    seconds: 0
+    minutes: "/30"
 
 action:
   - variables:
+      # Nordpool-priser
       prices: >
         {% set today = state_attr(ga, 'today') %}
         {% set tomorrow = state_attr(ga, 'tomorrow') %}
         {{ (today + tomorrow) if tomorrow else today }}
-      sorted: "{{ prices | sort(reverse=true) }}"
-      cutoff: "{{ sorted[eh - 1] if eh <= sorted | length else 0 }}"
-      current_price: "{{ prices[now().hour] }}"
+
+      # (time, pris)-par
+      priced_hours: >
+        {% set out = [] %}
+        {% for i in range(prices | length) %}
+          {% set out = out + [(i, prices[i])] %}
+        {% endfor %}
+        {{ out }}
+
+      # Sortert etter pris (dyrest først)
+      sorted_hours: >
+        {{ priced_hours | sort(attribute=1, reverse=true) }}
+
+      # Dyreste timer
+      expensive_hour_indexes: >
+        {{ sorted_hours[:eh] | map(attribute=0) | list }}
+
+      current_hour: "{{ now().hour }}"
+      is_expensive_hour: "{{ current_hour in expensive_hour_indexes }}"
+
+      is_on: "{{ states(target) != 'off' }}"
       force_active: "{{ is_state(force_flag, 'on') }}"
-      last_trigger: "{{ state_attr(this.entity_id, 'last_triggered') }}"
-      hours_since_trigger: >
-        {% if last_trigger %}
-          {{ (as_timestamp(now()) - as_timestamp(last_trigger)) / 3600 }}
+
+      hours_off: >
+        {% if is_on %}
+          0
         {% else %}
-          999
+          {{ (as_timestamp(now()) - as_timestamp(states[target].last_changed)) / 3600 }}
         {% endif %}
-      trigger_force: "{{ hours_since_trigger >= mo }}"
-      force_flag_last_changed: >
-        {% set changed = states[force_flag].last_changed %}
-        {{ (as_timestamp(now()) - as_timestamp(changed)) / 3600 if changed else 999 }}
+
   - choose:
+
+      # 🆘 Tvangs-PÅ hvis AV for lenge
       - conditions:
           - condition: template
-            value_template: "{{ trigger_force and not force_active }}"
+            value_template: "{{ hours_off >= mo and not force_active }}"
         sequence:
           - service: input_boolean.turn_on
             target:
-              entity_id: !input force_on_flag
+              entity_id: input_boolean.nordpool_force_hotwater
           - !input turn_on_action
+          - delay: "01:00:00"
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.nordpool_force_hotwater
 
+      # 🔥 Tvangs-PÅ aktiv
       - conditions:
           - condition: template
             value_template: "{{ force_active }}"
         sequence:
           - !input turn_on_action
-          - condition: template
-            value_template: "{{ force_flag_last_changed >= 1 }}"
-          - service: input_boolean.turn_off
-            target:
-              entity_id: !input force_on_flag
 
+      # 💰 Dyreste timer
       - conditions:
           - condition: template
-            value_template: "{{ current_price >= cutoff }}"
+            value_template: "{{ is_expensive_hour }}"
         sequence:
           - !input turn_on_action
 
