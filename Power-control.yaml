@@ -1,7 +1,7 @@
 blueprint:
   name: Nordpool – varmtvann dyreste timer + maks AV-tid
   description: >
-    Slår varmtvann PÅ i X dyreste timer i døgnet.
+    Slår varmtvann PÅ i X dyreste timer i døgnet basert på Nordpool-priser.
     Hvis den har vært AV i mer enn N timer, tvinges den PÅ i 1 time.
   domain: automation
 
@@ -47,11 +47,13 @@ trigger:
 
 action:
   - variables:
+      # Hent priser
       prices: >
         {% set today = state_attr(ga, 'today') %}
         {% set tomorrow = state_attr(ga, 'tomorrow') %}
         {{ (today + tomorrow) if tomorrow else today }}
 
+      # Lag (time, pris)-par
       priced_hours: >
         {% set out = [] %}
         {% for i in range(prices | length) %}
@@ -59,17 +61,24 @@ action:
         {% endfor %}
         {{ out }}
 
+      # Sorter timer etter pris (dyrest først)
       sorted_hours: >
         {{ priced_hours | sort(attribute=1, reverse=true) }}
 
+      # Velg de dyreste timene korrekt (ingen slicing)
       expensive_hours_idx: >
         {% set top = [] %}
-        {% for h in sorted_hours[:eh] %}
-          {% set top = top + [h[0]] %}
+        {% set counter = 0 %}
+        {% for h in sorted_hours %}
+          {% if counter < eh %}
+            {% set top = top + [h[0]] %}
+            {% set counter = counter + 1 %}
+          {% endif %}
         {% endfor %}
         {{ top }}
 
-      is_expensive: "{{ now().hour in expensive_hours_idx }}"
+      current_hour: "{{ now().hour }}"
+      is_expensive: "{{ current_hour in expensive_hours_idx }}"
 
       is_on: "{{ is_state(target, 'on') }}"
       force_active: "{{ is_state(force_flag, 'on') }}"
@@ -90,7 +99,7 @@ action:
 
   - choose:
 
-      # 🔴 Start tvangs-PÅ
+      # 🔴 Start tvangs-PÅ hvis AV for lenge
       - conditions:
           - condition: template
             value_template: "{{ hours_off >= mo and not force_active }}"
@@ -125,7 +134,7 @@ action:
         target:
           entity_id: !input target_entity
 
-  # 🔁 Avslutt tvangs-PÅ etter 1 time
+  # 🔁 Slå av tvangs-PÅ etter 1 time
   - choose:
       - conditions:
           - condition: template
