@@ -1,9 +1,8 @@
 blueprint:
   name: Nordpool – varmtvann dyreste timer + maks AV-tid
   description: >
-    Slår varmtvannstank PÅ i et valgt antall av de dyreste timene i døgnet
-    basert på Nordpool-priser. Hvis tanken har vært AV i mer enn X timer,
-    tvinges den PÅ i 1 time før normal prisstyring gjenopptas.
+    Slår varmtvann PÅ i X dyreste timer i døgnet basert på Nordpool.
+    Hvis den har vært AV i mer enn N timer, tvinges den PÅ i 1 time.
   domain: automation
 
   input:
@@ -14,7 +13,7 @@ blueprint:
           domain: sensor
 
     target_entity:
-      name: Enhet som styres (varmtvann)
+      name: Varmtvannstank (switch / climate / relay)
       selector:
         entity:
 
@@ -28,24 +27,11 @@ blueprint:
 
     max_off_hours:
       name: Maks sammenhengende timer AV
-      description: >
-        Hvis enheten har vært AV lenger enn dette,
-        tvinges den PÅ i 1 time.
       default: 5
       selector:
         number:
           min: 1
           max: 24
-
-    turn_on_action:
-      name: Handling for å slå PÅ
-      selector:
-        action: {}
-
-    turn_off_action:
-      name: Handling for å slå AV
-      selector:
-        action: {}
 
 variables:
   ga: !input nordpool_sensor
@@ -60,13 +46,11 @@ trigger:
 
 action:
   - variables:
-      # Nordpool-priser
       prices: >
         {% set today = state_attr(ga, 'today') %}
         {% set tomorrow = state_attr(ga, 'tomorrow') %}
         {{ (today + tomorrow) if tomorrow else today }}
 
-      # (time, pris)-par
       priced_hours: >
         {% set out = [] %}
         {% for i in range(prices | length) %}
@@ -74,11 +58,9 @@ action:
         {% endfor %}
         {{ out }}
 
-      # Sortert etter pris (dyrest først)
       sorted_hours: >
         {{ priced_hours | sort(attribute=1, reverse=true) }}
 
-      # Dyreste timer
       expensive_hour_indexes: >
         {{ sorted_hours[:eh] | map(attribute=0) | list }}
 
@@ -97,7 +79,7 @@ action:
 
   - choose:
 
-      # 🆘 Tvangs-PÅ hvis AV for lenge
+      # 🆘 Tvangs-PÅ
       - conditions:
           - condition: template
             value_template: "{{ hours_off >= mo and not force_active }}"
@@ -105,7 +87,9 @@ action:
           - service: input_boolean.turn_on
             target:
               entity_id: input_boolean.nordpool_force_hotwater
-          - !input turn_on_action
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input target_entity
           - delay: "01:00:00"
           - service: input_boolean.turn_off
             target:
@@ -116,16 +100,22 @@ action:
           - condition: template
             value_template: "{{ force_active }}"
         sequence:
-          - !input turn_on_action
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input target_entity
 
       # 💰 Dyreste timer
       - conditions:
           - condition: template
             value_template: "{{ is_expensive_hour }}"
         sequence:
-          - !input turn_on_action
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input target_entity
 
     default:
-      - !input turn_off_action
+      - service: homeassistant.turn_off
+        target:
+          entity_id: !input target_entity
 
 mode: single
