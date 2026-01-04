@@ -1,7 +1,7 @@
 blueprint:
   name: Nordpool – varmtvann dyreste timer + maks AV-tid
   description: >
-    Slår varmtvann PÅ i X dyreste timer i døgnet basert på Nordpool.
+    Slår varmtvann PÅ i X dyreste timer i døgnet.
     Hvis den har vært AV i mer enn N timer, tvinges den PÅ i 1 time.
   domain: automation
 
@@ -13,12 +13,13 @@ blueprint:
           domain: sensor
 
     target_entity:
-      name: Varmtvannstank (switch / climate / relay)
+      name: Varmtvannsbryter
       selector:
         entity:
+          domain: switch
 
     expensive_hours:
-      name: Antall dyreste timer per døgn
+      name: Antall dyreste timer
       default: 4
       selector:
         number:
@@ -26,7 +27,7 @@ blueprint:
           max: 24
 
     max_off_hours:
-      name: Maks sammenhengende timer AV
+      name: Maks timer AV sammenhengende
       default: 5
       selector:
         number:
@@ -58,16 +59,13 @@ action:
         {% endfor %}
         {{ out }}
 
-      sorted_hours: >
-        {{ priced_hours | sort(attribute=1, reverse=true) }}
+      expensive_hours_idx: >
+        {{ priced_hours | sort(attribute=1, reverse=true)[:eh]
+           | map(attribute=0) | list }}
 
-      expensive_hour_indexes: >
-        {{ sorted_hours[:eh] | map(attribute=0) | list }}
+      is_expensive: "{{ now().hour in expensive_hours_idx }}"
 
-      current_hour: "{{ now().hour }}"
-      is_expensive_hour: "{{ current_hour in expensive_hour_indexes }}"
-
-      is_on: "{{ states(target) != 'off' }}"
+      is_on: "{{ is_state(target, 'on') }}"
       force_active: "{{ is_state(force_flag, 'on') }}"
 
       hours_off: >
@@ -79,7 +77,7 @@ action:
 
   - choose:
 
-      # 🆘 Tvangs-PÅ
+      # 🔴 Start tvangs-PÅ
       - conditions:
           - condition: template
             value_template: "{{ hours_off >= mo and not force_active }}"
@@ -87,35 +85,45 @@ action:
           - service: input_boolean.turn_on
             target:
               entity_id: input_boolean.nordpool_force_hotwater
-          - service: homeassistant.turn_on
+          - service: switch.turn_on
             target:
               entity_id: !input target_entity
-          - delay: "01:00:00"
-          - service: input_boolean.turn_off
-            target:
-              entity_id: input_boolean.nordpool_force_hotwater
 
-      # 🔥 Tvangs-PÅ aktiv
+      # 🔥 Tvangs-PÅ aktiv (i maks 1 time)
       - conditions:
           - condition: template
-            value_template: "{{ force_active }}"
+            value_template: >
+              {{ force_active and
+                 (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) < 3600 }}
         sequence:
-          - service: homeassistant.turn_on
+          - service: switch.turn_on
             target:
               entity_id: !input target_entity
 
       # 💰 Dyreste timer
       - conditions:
           - condition: template
-            value_template: "{{ is_expensive_hour }}"
+            value_template: "{{ is_expensive }}"
         sequence:
-          - service: homeassistant.turn_on
+          - service: switch.turn_on
             target:
               entity_id: !input target_entity
 
     default:
-      - service: homeassistant.turn_off
+      - service: switch.turn_off
         target:
           entity_id: !input target_entity
+
+  # 🔁 Slå av tvangs-PÅ etter 1 time
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ force_active and
+                 (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) >= 3600 }}
+        sequence:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.nordpool_force_hotwater
 
 mode: single
