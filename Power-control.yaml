@@ -1,8 +1,9 @@
 blueprint:
-  name: Nordpool – varmtvann dyreste timer + maks AV-tid
+  name: Nordpool – varmtvann DYRESTE timer + prisuavhengig tvang
   description: >
-    Slår varmtvann PÅ i X dyreste timer i døgnet basert på Nordpool-priser.
-    Hvis den har vært AV i mer enn N timer, tvinges den PÅ i 1 time.
+    Slår varmtvann PÅ i X dyreste timer basert på Nordpool (kun i dag).
+    Hvis varmtvann har vært AV i mer enn N timer, tvinges den PÅ i 1 time
+    uavhengig av strømpris.
   domain: automation
 
   input:
@@ -19,7 +20,7 @@ blueprint:
           domain: switch
 
     expensive_hours:
-      name: Antall dyreste timer
+      name: Antall dyreste timer (PÅ)
       default: 4
       selector:
         number:
@@ -27,7 +28,7 @@ blueprint:
           max: 24
 
     max_off_hours:
-      name: Maks timer AV sammenhengende
+      name: Maks sammenhengende AV-tid (timer)
       default: 5
       selector:
         number:
@@ -47,13 +48,8 @@ trigger:
 
 action:
   - variables:
-      # Hent priser
-      prices: >
-        {% set today = state_attr(ga, 'today') %}
-        {% set tomorrow = state_attr(ga, 'tomorrow') %}
-        {{ (today + tomorrow) if tomorrow else today }}
+      prices: "{{ state_attr(ga, 'today') }}"
 
-      # Lag (time, pris)-par
       priced_hours: >
         {% set out = [] %}
         {% for i in range(prices | length) %}
@@ -61,21 +57,16 @@ action:
         {% endfor %}
         {{ out }}
 
-      # Sorter timer etter pris (dyrest først)
+      # Dyreste først
       sorted_hours: >
         {{ priced_hours | sort(attribute=1, reverse=true) }}
 
-      # Velg de dyreste timene korrekt (ingen slicing)
       expensive_hours_idx: >
-        {% set top = [] %}
-        {% set counter = 0 %}
-        {% for h in sorted_hours %}
-          {% if counter < eh %}
-            {% set top = top + [h[0]] %}
-            {% set counter = counter + 1 %}
-          {% endif %}
+        {% set res = [] %}
+        {% for h in sorted_hours[:eh] %}
+          {% set res = res + [h[0]] %}
         {% endfor %}
-        {{ top }}
+        {{ res }}
 
       current_hour: "{{ now().hour }}"
       is_expensive: "{{ current_hour in expensive_hours_idx }}"
@@ -92,14 +83,14 @@ action:
 
       force_elapsed: >
         {% if force_active %}
-          {{ (as_timestamp(now()) - as_timestamp(states[force_flag].last_changed)) }}
+          {{ as_timestamp(now()) - as_timestamp(states[force_flag].last_changed) }}
         {% else %}
           0
         {% endif %}
 
   - choose:
 
-      # 🔴 Start tvangs-PÅ hvis AV for lenge
+      # 🔴 START TVANG – uavhengig av pris
       - conditions:
           - condition: template
             value_template: "{{ hours_off >= mo and not force_active }}"
@@ -111,7 +102,7 @@ action:
             target:
               entity_id: !input target_entity
 
-      # 🔥 Tvangs-PÅ aktiv (maks 1 time)
+      # 🔥 TVANG AKTIV (maks 1 time)
       - conditions:
           - condition: template
             value_template: "{{ force_active and force_elapsed < 3600 }}"
@@ -120,7 +111,7 @@ action:
             target:
               entity_id: !input target_entity
 
-      # 💰 Dyreste timer
+      # 💰 DYRESTE TIMER
       - conditions:
           - condition: template
             value_template: "{{ is_expensive }}"
@@ -129,12 +120,13 @@ action:
             target:
               entity_id: !input target_entity
 
+    # ❄️ AV ellers
     default:
       - service: switch.turn_off
         target:
           entity_id: !input target_entity
 
-  # 🔁 Slå av tvangs-PÅ etter 1 time
+  # 🔁 Avslutt tvang etter 1 time
   - choose:
       - conditions:
           - condition: template
