@@ -1,45 +1,51 @@
 blueprint:
-  name: Nordpool – varmtvann DYRESTE timer + prisuavhengig tvang
+  name: Nordpool – Water heater on MOST EXPENSIVE hours + force
   description: >
-    Slår varmtvann PÅ i X dyreste timer basert på Nordpool (kun i dag).
-    Hvis varmtvann har vært AV i mer enn N timer, tvinges den PÅ i 1 time
-    uavhengig av strømpris.
+    Turns a water heater ON during the X most expensive hours based on
+    Nordpool prices. Supports 15-minute prices by calculating the correct
+    hourly price as the average of 4 intervals.
+    If the water heater has been OFF for more than N hours, it is forced ON
+    for 1 hour regardless of price.
   domain: automation
 
   input:
     nordpool_sensor:
-      name: Nordpool-prissensor
+      name: Nordpool price sensor
+      description: Sensor providing Nordpool prices (15 min or hourly)
       selector:
         entity:
           domain: sensor
 
     target_entity:
-      name: Varmtvannsbryter
+      name: Water heater switch
       selector:
         entity:
           domain: switch
 
     expensive_hours:
-      name: Antall dyreste timer (PÅ)
-      default: 4
+      name: Number of most expensive hours (ON)
+      default: 12
       selector:
         number:
           min: 1
           max: 24
 
     max_off_hours:
-      name: Maks sammenhengende AV-tid (timer)
+      name: Max continuous OFF time (hours)
       default: 5
       selector:
         number:
           min: 1
           max: 24
 
+mode: single
+
 variables:
-  ga: !input nordpool_sensor
-  target: !input target_entity
-  eh: !input expensive_hours
-  mo: !input max_off_hours
+  price_sensor: !input nordpool_sensor
+  target_switch: !input target_entity
+  expensive_count: !input expensive_hours
+  max_off: !input max_off_hours
+
   force_flag: input_boolean.nordpool_force_hotwater
 
 trigger:
@@ -48,37 +54,55 @@ trigger:
 
 action:
   - variables:
-      prices: "{{ state_attr(ga, 'today') }}"
 
-      priced_hours: >
+      # --- READ PRICE DATA ---
+      prices_15m: "{{ state_attr(price_sensor, 'today') or [] }}"
+
+      # --- BUILD 24 HOURLY PRICES (AVERAGE OF 4x15 MIN) ---
+      prices_hourly: >
         {% set out = [] %}
-        {% for i in range(prices | length) %}
-          {% set out = out + [(i, prices[i])] %}
+        {% for h in range(24) %}
+          {% set chunk = prices_15m[h*4:(h+1)*4] %}
+          {% if chunk | length == 4 %}
+            {% set out = out + [ (chunk | sum) / 4 ] %}
+          {% else %}
+            {% set out = out + [0] %}
+          {% endif %}
         {% endfor %}
         {{ out }}
 
-      # Dyreste først
+      # --- MAP HOUR → PRICE ---
+      priced_hours: >
+        {% set out = [] %}
+        {% for i in range(prices_hourly | length) %}
+          {% set out = out + [(i, prices_hourly[i])] %}
+        {% endfor %}
+        {{ out }}
+
+      # --- SORT BY PRICE (DESCENDING) ---
       sorted_hours: >
         {{ priced_hours | sort(attribute=1, reverse=true) }}
 
+      # --- SELECT MOST EXPENSIVE HOURS ---
       expensive_hours_idx: >
         {% set res = [] %}
-        {% for h in sorted_hours[:eh] %}
+        {% for h in sorted_hours[:expensive_count] %}
           {% set res = res + [h[0]] %}
         {% endfor %}
         {{ res }}
 
+      # --- CURRENT STATUS ---
       current_hour: "{{ now().hour }}"
       is_expensive: "{{ current_hour in expensive_hours_idx }}"
 
-      is_on: "{{ is_state(target, 'on') }}"
+      is_on: "{{ is_state(target_switch, 'on') }}"
       force_active: "{{ is_state(force_flag, 'on') }}"
 
       hours_off: >
         {% if is_on %}
           0
         {% else %}
-          {{ (as_timestamp(now()) - as_timestamp(states[target].last_changed)) / 3600 }}
+          {{ (as_timestamp(now()) - as_timestamp(states[target_switch].last_changed)) / 3600 }}
         {% endif %}
 
       force_elapsed: >
@@ -90,10 +114,10 @@ action:
 
   - choose:
 
-      # 🔴 START TVANG – uavhengig av pris
+      # 🔴 START FORCE MODE (price independent)
       - conditions:
           - condition: template
-            value_template: "{{ hours_off >= mo and not force_active }}"
+            value_template: "{{ hours_off >= max_off and not force_active }}"
         sequence:
           - service: input_boolean.turn_on
             target:
@@ -102,7 +126,7 @@ action:
             target:
               entity_id: !input target_entity
 
-      # 🔥 TVANG AKTIV (maks 1 time)
+      # 🔥 FORCE MODE ACTIVE (max 1 hour)
       - conditions:
           - condition: template
             value_template: "{{ force_active and force_elapsed < 3600 }}"
@@ -111,7 +135,7 @@ action:
             target:
               entity_id: !input target_entity
 
-      # 💰 DYRESTE TIMER
+      # 💰 MOST EXPENSIVE HOURS
       - conditions:
           - condition: template
             value_template: "{{ is_expensive }}"
@@ -120,13 +144,13 @@ action:
             target:
               entity_id: !input target_entity
 
-    # ❄️ AV ellers
+    # ❄️ OTHERWISE OFF
     default:
       - service: switch.turn_off
         target:
           entity_id: !input target_entity
 
-  # 🔁 Avslutt tvang etter 1 time
+  # 🔁 END FORCE MODE AFTER 1 HOUR
   - choose:
       - conditions:
           - condition: template
@@ -135,5 +159,3 @@ action:
           - service: input_boolean.turn_off
             target:
               entity_id: input_boolean.nordpool_force_hotwater
-
-mode: single
