@@ -1,161 +1,140 @@
 blueprint:
-  name: Nordpool – Water heater on MOST EXPENSIVE hours + force
+  name: Nordpool price based on expensive hours on
   description: >
-    Turns a water heater ON during the X most expensive hours based on
-    Nordpool prices. Supports 15-minute prices by calculating the correct
-    hourly price as the average of 4 intervals.
-    If the water heater has been OFF for more than N hours, it is forced ON
-    for 1 hour regardless of price.
+    This blueprint uses the nordpool integration and lets you turn ON
+    devices during the most expensive hours of the day.
   domain: automation
 
   input:
-    nordpool_sensor:
-      name: Nordpool price sensor
-      description: Sensor providing Nordpool prices (15 min or hourly)
+    grid_area:
+      name: Grid area sensor
       selector:
         entity:
           domain: sensor
+          integration: nordpool
 
-    target_entity:
-      name: Water heater switch
+    start_minute:
+      name: Start minute
+      default: 0
       selector:
-        entity:
-          domain: switch
+        number:
+          min: 0
+          max: 59
+          mode: slider
+          step: 1
 
-    expensive_hours:
-      name: Number of most expensive hours (ON)
+    end_minute:
+      name: End minute
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 59
+          mode: slider
+          step: 1
+
+    hour_rank:
+      name: Hours on (most expensive)
+      description: Number of most expensive hours per day to turn ON
       default: 12
       selector:
         number:
-          min: 1
+          min: 0
           max: 24
+          mode: slider
+          step: 1
 
-    max_off_hours:
-      name: Max continuous OFF time (hours)
-      default: 5
+    hour_ratio:
+      name: Hour percent (from max price)
+      description: >
+        Max percent difference from daily maximum price to turn ON devices
+      default: 50
       selector:
         number:
-          min: 1
-          max: 24
+          min: 0
+          max: 100
+          mode: slider
+          step: 5
 
-mode: single
+    allways_on:
+      name: Always on price
+      description: If price is ABOVE this value device is always ON
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 20
+          mode: slider
+          step: 0.1
+
+    allways_off:
+      name: Always off price
+      description: If price is BELOW this value device is always OFF
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 20
+          mode: slider
+          step: 0.1
+
+    turnon:
+      name: Turn On actions
+      selector:
+        action: {}
+
+    turnoff:
+      name: Turn Off actions
+      selector:
+        action: {}
 
 variables:
-  price_sensor: !input nordpool_sensor
-  target_switch: !input target_entity
-  expensive_count: !input expensive_hours
-  max_off: !input max_off_hours
+  grid_area_var: !input grid_area
+  hour_rank_input: !input hour_rank
+  hour_rank_var: "{{ (hour_rank_input | float * 4) | int }}"
+  hour_ratio_var: !input hour_ratio
+  allways_on_var: !input allways_on
+  allways_off_var: !input allways_off
+  start_minute_var: !input start_minute
+  end_minute_var: !input end_minute
 
-  force_flag: input_boolean.nordpool_force_hotwater
+  prices: "{{ state_attr(grid_area_var, 'today') | list }}"
+  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
+  price: "{{ prices[idx] | float if idx < prices | length else prices[-1] | float }}"
+
+  sorted_prices: "{{ prices | sort }}"
+  max_price: "{{ sorted_prices[-1] }}"
+  min_price: "{{ sorted_prices[0] }}"
+  diff: "{{ max_price - min_price }}"
+
+  below_high: "{{ max_price - price }}"
+  ratio: "{{ ((below_high / diff) * 100) | round if diff > 0 else 0 }}"
+
+  rank_expensive: "{{ (sorted_prices | reverse).index(price) + 1 }}"
+
+  condition_always_on_price: "{{ price >= allways_on_var | float }}"
+  condition_price_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
+  condition_rank_expensive_hours: "{{ rank_expensive | int <= hour_rank_var | int }}"
+
+  seton: >
+    {{ condition_always_on_price
+       or condition_price_ratio
+       or condition_rank_expensive_hours }}
+
+  result: "{{ price > allways_off_var and seton }}"
 
 trigger:
   - platform: time_pattern
-    minutes: "/30"
+    minutes: !input start_minute
+  - platform: time_pattern
+    minutes: !input end_minute
 
 action:
-  - variables:
-
-      # --- READ PRICE DATA ---
-      prices_15m: "{{ state_attr(price_sensor, 'today') or [] }}"
-
-      # --- BUILD 24 HOURLY PRICES (AVERAGE OF 4x15 MIN) ---
-      prices_hourly: >
-        {% set out = [] %}
-        {% for h in range(24) %}
-          {% set chunk = prices_15m[h*4:(h+1)*4] %}
-          {% if chunk | length == 4 %}
-            {% set out = out + [ (chunk | sum) / 4 ] %}
-          {% else %}
-            {% set out = out + [0] %}
-          {% endif %}
-        {% endfor %}
-        {{ out }}
-
-      # --- MAP HOUR → PRICE ---
-      priced_hours: >
-        {% set out = [] %}
-        {% for i in range(prices_hourly | length) %}
-          {% set out = out + [(i, prices_hourly[i])] %}
-        {% endfor %}
-        {{ out }}
-
-      # --- SORT BY PRICE (DESCENDING) ---
-      sorted_hours: >
-        {{ priced_hours | sort(attribute=1, reverse=true) }}
-
-      # --- SELECT MOST EXPENSIVE HOURS ---
-      expensive_hours_idx: >
-        {% set res = [] %}
-        {% for h in sorted_hours[:expensive_count] %}
-          {% set res = res + [h[0]] %}
-        {% endfor %}
-        {{ res }}
-
-      # --- CURRENT STATUS ---
-      current_hour: "{{ now().hour }}"
-      is_expensive: "{{ current_hour in expensive_hours_idx }}"
-
-      is_on: "{{ is_state(target_switch, 'on') }}"
-      force_active: "{{ is_state(force_flag, 'on') }}"
-
-      hours_off: >
-        {% if is_on %}
-          0
-        {% else %}
-          {{ (as_timestamp(now()) - as_timestamp(states[target_switch].last_changed)) / 3600 }}
-        {% endif %}
-
-      force_elapsed: >
-        {% if force_active %}
-          {{ as_timestamp(now()) - as_timestamp(states[force_flag].last_changed) }}
-        {% else %}
-          0
-        {% endif %}
-
-  - choose:
-
-      # 🔴 START FORCE MODE (price independent)
-      - conditions:
-          - condition: template
-            value_template: "{{ hours_off >= max_off and not force_active }}"
-        sequence:
-          - service: input_boolean.turn_on
-            target:
-              entity_id: input_boolean.nordpool_force_hotwater
-          - service: switch.turn_on
-            target:
-              entity_id: !input target_entity
-
-      # 🔥 FORCE MODE ACTIVE (max 1 hour)
-      - conditions:
-          - condition: template
-            value_template: "{{ force_active and force_elapsed < 3600 }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input target_entity
-
-      # 💰 MOST EXPENSIVE HOURS
-      - conditions:
-          - condition: template
-            value_template: "{{ is_expensive }}"
-        sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input target_entity
-
-    # ❄️ OTHERWISE OFF
-    default:
-      - service: switch.turn_off
-        target:
-          entity_id: !input target_entity
-
-  # 🔁 END FORCE MODE AFTER 1 HOUR
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ force_active and force_elapsed >= 3600 }}"
-        sequence:
-          - service: input_boolean.turn_off
-            target:
-              entity_id: input_boolean.nordpool_force_hotwater
+            value_template: "{{ result }}"
+        sequence: !input turnon
+    default: !input turnoff
+
+mode: single
