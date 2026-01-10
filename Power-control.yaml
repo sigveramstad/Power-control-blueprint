@@ -1,20 +1,21 @@
 blueprint:
-  name: Nordpool Price – Expensive Hours Control
+  name: "Nordpool Price – Expensive Hours Control"
   description: >
-    Turns a device on/off based on Nord Pool prices, prioritizing the most expensive hours.
-    The device is ON during the X highest-priced hours each day (configurable), and OFF during cheap hours.
-    Includes a safeguard to avoid more than a set number of consecutive off-hours.
+    Automation to turn a device (e.g., water heater) **ON** during the most expensive 
+    electricity price hours and **OFF** during the cheapest hours. Allows configuring how 
+    many hours per day are considered "expensive" (device ON), and ensures the device 
+    doesn't stay OFF for more than a set number of hours in a row.
   domain: automation
 
   input:
     nordpool_config_entry_id:
       name: Nord Pool Configuration Entry ID
-      description: "Find this ID in Developer Tools > Services > Nord Pool: Get prices (YAML mode)."
+      description: "ID for Nord Pool integration (from Developer Tools > Services)."
       selector:
         text: {}
     price_divisor:
       name: Price Divisor
-      description: "Divide the Nord Pool price by this value (e.g. 1000 to convert from per MWh to per kWh)."
+      description: "Divide the Nord Pool price by this value (e.g., 1000 to convert MWh to kWh)."
       default: 1000
       selector:
         number:
@@ -22,18 +23,18 @@ blueprint:
           max: 10000
           step: 1
     expensive_hours_on:
-      name: Expensive Hours On
-      description: "Number of most expensive hours per day to run the device."
+      name: Expensive Hours On (per day)
+      description: "Number of highest-priced hours each day to keep the device ON."
       default: 12
       selector:
         number:
-          min: 0
+          min: 1
           max: 24
           mode: slider
           step: 1
     expensive_percent:
       name: Expensive Hour Percent
-      description: "Price percentile above which the device should be on (e.g. 50% = upper half of day’s prices)."
+      description: "Turn ON if current price is above this percentile of today's range (e.g., 50% = top half of prices)."
       default: 50
       selector:
         number:
@@ -42,28 +43,26 @@ blueprint:
           mode: slider
           step: 5
     always_on_price:
-      name: Always On Price (High threshold)
-      description: "If price rises above this value (Local currency/kWh), force the device ON (overrides other conditions)."
+      name: Always ON Price Threshold
+      description: "If price rises above this value (local currency/kWh), force device ON (override other conditions)."
       default: 5.0
       selector:
         number:
           min: 0.0
-          max: 10.0
-          mode: slider
+          max: 20.0
           step: 0.1
     always_off_price:
-      name: Always Off Price (Low threshold)
-      description: "If price falls below this value (Local currency/kWh), force the device OFF (overrides other conditions)."
+      name: Always OFF Price Threshold
+      description: "If price falls below this value, force device OFF (override other conditions)."
       default: 0.0
       selector:
         number:
           min: 0.0
-          max: 10.0
-          mode: slider
+          max: 20.0
           step: 0.1
     max_off_hours:
-      name: Max Off Hours in a Row
-      description: "Maximum consecutive hours the device can stay off before it must turn on (to maintain temperature)."
+      name: Max Consecutive OFF Hours
+      description: "Maximum number of hours the device can stay OFF in a row before it’s forced ON."
       default: 5
       selector:
         number:
@@ -72,114 +71,103 @@ blueprint:
           mode: slider
           step: 1
     turnon:
-      name: Turn On Actions
-      description: "Action(s) to run when the device should be turned ON."
-      default: []
+      name: Turn ON Actions
+      description: "Action(s) to run when turning the device ON (e.g., switch on the heater)."
       selector:
         action: {}
     turnoff:
-      name: Turn Off Actions
-      description: "Action(s) to run when the device should be turned OFF."
-      default: []
+      name: Turn OFF Actions
+      description: "Action(s) to run when turning the device OFF."
       selector:
         action: {}
 
-  variables:
-    hours_expensive: !input expensive_hours_on
-    percent_expensive: !input expensive_percent
-    high_price_thr: !input always_on_price
-    low_price_thr: !input always_off_price
-    max_off: !input max_off_hours
-    divisor: !input price_divisor
+variables:
+  hours_expensive: !input 'expensive_hours_on'
+  percent_expensive: !input 'expensive_percent'
+  high_price_thr: !input 'always_on_price'
+  low_price_thr: !input 'always_off_price'
+  max_off: !input 'max_off_hours'
+  divisor: !input 'price_divisor'
 
-  trigger:
-    - platform: time_pattern
-      # Check every 15 minutes (supports quarter-hour pricing as well as hourly)
-      minutes: "/15"
+trigger:
+  - platform: time_pattern
+    minutes: "/15"  # Check every 15 minutes (supports 15-min Nordpool prices)
 
-  action:
-    # 1. Fetch today's price data via Nord Pool integration service
-    - service: nordpool.get_prices_for_date
-      data:
-        config_entry: !input nordpool_config_entry_id
-        date: "{{ now().date() }}"
-      target: {}
-      response_variable: price_data  # stores the result as 'price_data'
+action:
+  # 1. Fetch today's price data via Nord Pool integration
+  - service: nordpool.get_prices_for_date
+    data:
+      config_entry: !input 'nordpool_config_entry_id'
+      date: "{{ now().date() }}"
+    target: {}
+    response_variable: price_data
 
-    # 2. Compute price list and determine current price index
-    - variables:
-        prices: >-
-          {% set region = price_data.keys() | first %}
-          {% set raw_prices = price_data[region] %}
-          {% set price_list = [] %}
-          {% for item in raw_prices %}
-            {% set p = item.price | float(0) / (divisor | float(1)) %}
-            {% set price_list = price_list + [ p | round(4) ] %}
-          {% endfor %}
-          {{ price_list }}
-        total_count: "{{ prices | length }}"
-        # Current time index (if 15-min data, index = hour*4 + quarter; if hourly, index = hour)
-        now_idx: >-
-          {% if total_count|int > 24 %}
-            {{ (now().hour * 4) + (now().minute // 15) }}
+  # 2. Calculate price list and determine current conditions
+  - variables:
+      prices: >-
+        {% set region = price_data.keys() | first %}
+        {% set price_list = [] %}
+        {% for item in price_data[region] %}
+          {% set p = item.price | float(0) / (divisor | float(1)) %}
+          {% set price_list = price_list + [ p | round(4) ] %}
+        {% endfor %}
+        {{ price_list }}
+      total_count: "{{ prices | length }}"
+      # Determine current index (account for 15-min vs hourly pricing)
+      now_idx: >-
+        {% if total_count | int > 24 %}
+          {{ (now().hour * 4) + (now().minute // 15) }}
+        {% else %}
+          {{ now().hour }}
+        {% endif %}
+      current_price: "{{ prices[now_idx | int] if now_idx | int < total_count | int else prices[-1] }}"
+      sorted_prices: "{{ prices | sort }}"
+      min_price: "{{ sorted_prices[0] | float(0) }}"
+      max_price: "{{ sorted_prices[-1] | float(0) }}"
+      # Calculate the price threshold that separates "expensive" hours from cheap ones
+      expensive_threshold: >-
+        {% set count = total_count | int %}
+        {% set per_hour = count // 24 if count >= 24 else 1 %}
+        {% set exp_hours = hours_expensive | int %}
+        {% if exp_hours >= 24 %}
+          {{ min_price }}    {# All hours are ON (threshold = lowest price) #}
+        {% elif exp_hours <= 0 %}
+          {{ max_price + 0.0001 }}  {# No hours ON (threshold just above max price) #}
+        {% else %}
+          {% set thr_index = count - (exp_hours * per_hour) %}
+          {% if thr_index < 0 %}{% set thr_index = 0 %}{% endif %}
+          {{ sorted_prices[thr_index] }}
+        {% endif %}
+      # Count how many upcoming intervals would be OFF consecutively (price below threshold)
+      off_run_count: >-
+        {% set off_count = 0 %}
+        {% set thr = expensive_threshold | float(0) %}
+        {% for i in range(now_idx | int, total_count | int) %}
+          {% if prices[i] < thr %}
+            {% set off_count = off_count + 1 %}
           {% else %}
-            {{ now().hour }}
+            {% break %}
           {% endif %}
-        current_price: "{{ prices[now_idx|int] if now_idx|int < total_count|int else prices[-1] }}"
-        # Sort prices to get min, max, and threshold for expensive hours
-        sorted_prices: "{{ prices | sort }}"
-        min_price: "{{ sorted_prices[0] | float(0) }}"
-        max_price: "{{ sorted_prices[-1] | float(0) }}"
-        # Calculate percentage position of current price in range (0% = min, 100% = max):
-        price_percent: >-
-          {% set diff = max_price - min_price %}
-          {{ ( (current_price | float(0) - min_price) / (diff if diff != 0 else 1) * 100 ) | round(0) }}
-        # Determine if current price is within the top 'expensive' hours of the day:
-        expensive_threshold: >-
-          {% set count = total_count | int %}
-          {% set exp_hours = hours_expensive | int %}
-          {% if exp_hours <= 0 %}
-            {% set idx = count %}   # no hours selected -> set threshold index beyond last (device mostly off)
-          {% elif exp_hours >= 24 %}
-            {% set idx = 0 %}      # 24 or more means all day on -> threshold is min price
-          {% else %}
-            {% set idx = count - (exp_hours * (count // 24)) %}
-          {% endif %}
-          {% if idx < 0 %} {% set idx = 0 %}{% endif %}
-          {{ sorted_prices[idx] }}
-        is_expensive_hour: "{{ current_price | float(0) >= (expensive_threshold | float(0)) }}"
-        # Calculate how many upcoming intervals will be off (cheap) consecutively from now
-        off_run_count: >-
-          {% set off_count = 0 %}
-          {% set thresh = expensive_threshold | float(0) %}
-          {% for i in range(now_idx|int, total_count|int) %}
-            {% if prices[i] < thresh %}
-              {% set off_count = off_count + 1 %}
-            {% else %}
-              {% break %}
-            {% endif %}
-          {% endfor %}
-          {{ off_count }}
-        exceeds_off_limit: >-
-          {% set max_off_int = max_off | int * ( (total_count|int) // 24 ) %}
-          {{ 1 if off_run_count | int > max_off_int | int else 0 }}
-        # Final decision: should the device be ON?
-        turn_on: >-
-          {{ 
-             (current_price | float(0) >= high_price_thr | float(0))    /* Always On if price above high threshold */ 
-             or (price_percent | int >= percent_expensive | int)        /* OR if current price is above the set percentile of range */ 
-             or is_expensive_hour                                      /* OR if within the top X expensive hours of the day */ 
-             or (exceeds_off_limit | int == 1)                          /* OR if we'd exceed max off-hour limit */ 
-          }}
-        # Enforce Always Off if below low price threshold:
-        turn_off: "{{ current_price | float(0) <= low_price_thr | float(0) }}"
+        {% endfor %}
+        {{ off_count }}
+      # Flags for decision making
+      exceeds_off_limit: "{{ off_run_count | int >= (max_off | int * (total_count | int // 24)) }}"
+      is_expensive_hour: "{{ current_price | float(0) >= (expensive_threshold | float(0)) }}"
+      is_high_percent: >-
+        {% set diff = max_price - min_price %}
+        {{ ( (current_price | float(0) - min_price) / (diff if diff != 0 else 1) * 100 ) | round(0) >= (percent_expensive | int) }}
+      # Determine whether to turn ON or OFF
+      turn_on: >-
+        {{ (current_price | float(0) >= high_price_thr | float(0))    /* Always ON if price above high threshold */
+           or is_high_percent                                         /* OR if price is above specified percentile */
+           or is_expensive_hour                                       /* OR if this hour is among the top X expensive hours */
+           or exceeds_off_limit }}                                    /* OR if OFF-period would exceed max_off_hours */
+      turn_off: "{{ current_price | float(0) <= low_price_thr | float(0) }}"  # Always OFF if below low threshold
 
-    # 3. Choose the appropriate action sequence based on conditions
-    - choose:
-        - conditions:
-            # Turn ON if any 'turn_on' condition is true, **and** the Always-Off condition is NOT triggered
-            - "{{ turn_on | lower == 'true' and turn_off | lower != 'true' }}"
-          sequence: !input turnon
-      default: !input turnoff
+  # 3. Choose the appropriate action (ON or OFF)
+  - choose:
+      - conditions: "{{ turn_on | lower == 'true' and turn_off | lower != 'true' }}"
+        sequence: !input turnon
+    default: !input turnoff
 
-  mode: single
+mode: single
