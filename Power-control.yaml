@@ -1,135 +1,151 @@
 blueprint:
-  name: Nordpool price based on expensive hours on
-  description: >
-    This blueprint uses the nordpool integration and lets you turn ON
-    devices during the most expensive hours of the day.
+  name: Nordpool price based on off
+  description: Turns devices on/off based on total price including variable VAT and fixed fees. Supports 15-minute pricing.
   domain: automation
-
   input:
-    grid_area:
-      name: Grid area sensor
+    nordpool_config_entry_id:
+      name: Nord Pool Configuration Entry ID
+      description: "Find this ID in Developer Tools > Actions > Nord Pool: Get prices (YAML mode)"
       selector:
-        entity:
-          domain: sensor
-          integration: nordpool
-
-    start_minute:
-      name: Start minute
-      default: 0
-      selector:
-        number:
-          min: 0
-          max: 59
-          mode: slider
-          step: 1
-
-    end_minute:
-      name: End minute
-      default: 0
-      selector:
-        number:
-          min: 0
-          max: 59
-          mode: slider
-          step: 1
-
+        text:
     hour_rank:
-      name: Hours on (most expensive)
-      description: Number of most expensive hours per day to turn ON
+      name: Hours on
+      description: >
+        The minimum number of hours you want the device to run each day. 
+        The blueprint ranks all slots from cheapest to most expensive.
       default: 12
       selector:
         number:
-          min: 0
-          max: 24
+          min: 0.0
+          max: 24.0
           mode: slider
-          step: 1
-
+          step: 1.0
     hour_ratio:
-      name: Hour percent (from max price)
+      name: Hour percent
       description: >
-        Max percent difference from daily maximum price to turn ON devices
+        Setting of 50% means the device is on if the price is in the lower half of the day's price range.
       default: 50
       selector:
         number:
-          min: 0
-          max: 100
+          min: 0.0
+          max: 100.0
           mode: slider
-          step: 5
-
+          step: 5.0
+    price_divisor:
+      name: Price Divisor
+      description: >
+        Use 1000 to convert price/MWh to price/kWh.
+      default: 1000
+      selector:
+        number:
+          min: 1
+          max: 10000
+          step: 10
+    vat_multiplier:
+      name: VAT Multiplier
+      description: "Handles local tax (e.g. 1.25 for 25% moms)."
+      default: 1.25
+      selector:
+        number:
+          min: 1.0
+          max: 2.0
+          step: 0.01
+    fixed_fees_per_kwh:
+      name: Fixed Fees per kWh
+      description: "Flat fees in local currency (e.g. 0.125 for 12.5 öre)."
+      default: 0.125
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.001
     allways_on:
-      name: Always on price
-      description: If price is ABOVE this value device is always ON
-      default: 20
+      name: Always on price (Local Currency/kWh)
+      description: "If price drops below this, device stays on regardless of rank."
+      default: 0.0
       selector:
         number:
-          min: 0
-          max: 20
+          min: 0.0
+          max: 10.0
           mode: slider
-          step: 0.1
-
+          step: 0.05
     allways_off:
-      name: Always off price
-      description: If price is BELOW this value device is always OFF
-      default: 0
+      name: Always off price (Local Currency/kWh)
+      description: "If price rises above this, device is forced off to protect against spikes."
+      default: 2.5
       selector:
         number:
-          min: 0
-          max: 20
+          min: 0.0
+          max: 10.0
           mode: slider
-          step: 0.1
-
+          step: 0.05
     turnon:
-      name: Turn On actions
+      name: Turn On Actions
+      default: []
       selector:
         action: {}
-
     turnoff:
-      name: Turn Off actions
+      name: Turn Off Actions
+      default: []
       selector:
         action: {}
 
 variables:
-  grid_area_var: !input grid_area
   hour_rank_input: !input hour_rank
-  hour_rank_var: "{{ (hour_rank_input | float * 4) | int }}"
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
-  start_minute_var: !input start_minute
-  end_minute_var: !input end_minute
-
-  prices: "{{ state_attr(grid_area_var, 'today') | list }}"
-  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
-  price: "{{ prices[idx] | float if idx < prices | length else prices[-1] | float }}"
-
-  sorted_prices: "{{ prices | sort }}"
-  max_price: "{{ sorted_prices[-1] }}"
-  min_price: "{{ sorted_prices[0] }}"
-  diff: "{{ max_price - min_price }}"
-
-  below_high: "{{ max_price - price }}"
-  ratio: "{{ ((below_high / diff) * 100) | round if diff > 0 else 0 }}"
-
-  rank_expensive: "{{ (sorted_prices | reverse).index(price) + 1 }}"
-
-  condition_always_on_price: "{{ price >= allways_on_var | float }}"
-  condition_price_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
-  condition_rank_expensive_hours: "{{ rank_expensive | int <= hour_rank_var | int }}"
-
-  seton: >
-    {{ condition_always_on_price
-       or condition_price_ratio
-       or condition_rank_expensive_hours }}
-
-  result: "{{ price > allways_off_var and seton }}"
+  vat_multiplier_var: !input vat_multiplier
+  fixed_fees_var: !input fixed_fees_per_kwh
+  divisor_var: !input price_divisor
 
 trigger:
   - platform: time_pattern
-    minutes: !input start_minute
-  - platform: time_pattern
-    minutes: !input end_minute
+    minutes: "/15"
 
 action:
+  - action: nordpool.get_prices_for_date
+    data:
+      config_entry: !input nordpool_config_entry_id
+      date: "{{ now().date() }}"
+    response_variable: daily_data
+
+  - variables:
+      prices_total: >
+        {% set region = daily_data.keys() | first %}
+        {% set ns = namespace(p=[]) %}
+        {% for item in daily_data[region] %}
+          {% set base_unit = item.price | float(0) / (divisor_var | float(1)) %}
+          {% set total = (base_unit * (vat_multiplier_var | float(1.0))) + (fixed_fees_var | float(0)) %}
+          {% set ns.p = ns.p + [total | round(4)] %}
+        {% endfor %}
+        {{ ns.p }}
+      
+      idx: >
+        {% set count = prices_total | length %}
+        {% if count > 24 %}
+          {{ (now().hour * 4) + (now().minute // 15) }}
+        {% else %}
+          {{ now().hour }}
+        {% endif %}
+
+      price: "{{ prices_total[idx | int] | float(0) if (idx | int) < (prices_total | length) else prices_total[-1] | float(0) }}"
+      sorted_prices: "{{ prices_total | sort | list }}"
+      min_p: "{{ sorted_prices | min | float(0) }}"
+      max_p: "{{ sorted_prices | max | float(0) }}"
+      
+      above_low: "{{ (price | float(0)) - (min_p | float(0)) }}"
+      diff: "{{ (max_p | float(0)) - (min_p | float(0)) }}"
+      ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
+      rank: "{{ (sorted_prices.index(price | float) + 1) | int if price in sorted_prices else 99 }}"
+      
+      condition_rank: "{{ rank | int <= (hour_rank_input | float * (prices_total | length / 24)) | int }}"
+      seton: >
+        {{ price <= (allways_on_var | float(0)) or 
+           (ratio | int <= (hour_ratio_var | int)) or 
+           condition_rank }}
+      result: "{{ price < (allways_off_var | float(0)) and seton }}"
+
   - choose:
       - conditions:
           - condition: template
