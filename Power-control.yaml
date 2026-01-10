@@ -1,19 +1,20 @@
 blueprint:
-  name: "Nordpool Price – Expensive Hours Control (Reversed Logic)"
+  name: "Nordpool Price – Expensive Hours (Reversed Logic)"
   description: >
-    Turn a device (e.g., water heater) ON during the most expensive Nord Pool price hours 
-    and OFF during the cheapest hours. Configurable number of expensive hours per day, 
-    with a safety limit on max consecutive off-hours. (No VAT or fixed fees in calculation.)
+    Turn a device (e.g., water heater) **ON** during the most expensive Nord Pool price hours 
+    and **OFF** during the cheapest hours. Configurable number of expensive hours per day to run, 
+    with a safeguard on max consecutive off-hours. Also includes optional high/low price thresholds 
+    to always force ON or OFF like in the original blueprint.
   domain: automation
 
   input:
     nordpool_sensor:
       name: Nord Pool Price Sensor
-      description: "Select your Nord Pool price sensor entity."
+      description: "Select your Nord Pool price sensor entity (dropdown)."
       selector:
         entity:
           domain: sensor
-          integration: nordpool   # Only show Nord Pool sensors in the dropdown
+          integration: nordpool
     expensive_hours_on:
       name: Expensive Hours On (per day)
       description: "Number of highest-priced hours per day to turn the device ON."
@@ -26,10 +27,27 @@ blueprint:
           step: 1
     max_off_hours:
       name: Max Consecutive OFF Hours
-      description: "Maximum hours the device can stay OFF in a row before being forced ON."
+      description: "Max hours the device can stay OFF in a row before being forced ON."
       default: 5
       selector:
         number:
           min: 1
           max: 24
           mode: slider
+          step: 1
+    always_on_price:
+      name: Always ON Price Threshold
+      description: "If price exceeds this value (currency/kWh), force device ON (override schedule)."
+      default: 5.0
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          step: 0.1
+    always_off_price:
+      name: Always OFF Price Threshold
+      description: "If price falls below this value, force device OFF (override max off-hour rule)."
+      default: 0.0
+      selector:
+        number:
+          min: 0.0
