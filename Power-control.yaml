@@ -1,9 +1,9 @@
-
 blueprint:
   name: "Nordpool Price – Expensive Hours Control (Reversed Logic)"
   description: >
-    Turn a device (e.g., water heater) **ON** during the most expensive Nord Pool price hours and **OFF** during the cheapest hours. 
-    Allows configuring how many hours per day are considered "expensive" (device ON), and ensures the device doesn't stay OFF for more than a set number of hours consecutively.
+    Turn a device (e.g., water heater) ON during the most expensive Nord Pool price hours 
+    and OFF during the cheapest hours. Configurable number of expensive hours per day, with a safety 
+    limit on max consecutive off-hours.
   domain: automation
 
   input:
@@ -13,10 +13,10 @@ blueprint:
       selector:
         entity:
           domain: sensor
-          integration: nordpool   # Ensures only Nord Pool sensors are shown
+          integration: nordpool   # Only show Nord Pool sensor entities
     expensive_hours_on:
       name: Expensive Hours On (per day)
-      description: "Number of highest-priced hours per day to run the device."
+      description: "Number of highest-priced hours per day to run the device (turn ON)."
       default: 12
       selector:
         number:
@@ -26,7 +26,7 @@ blueprint:
           step: 1
     max_off_hours:
       name: Max Consecutive OFF Hours
-      description: "Max number of hours the device can stay OFF in a row before it's forced ON."
+      description: "Maximum hours the device can stay OFF in a row before it's forced ON."
       default: 5
       selector:
         number:
@@ -36,7 +36,7 @@ blueprint:
           step: 1
     always_on_price:
       name: Always ON Price Threshold
-      description: "If price rises above this value, force device ON (override schedule). Leave high if not used."
+      description: "If price rises above this value (currency/kWh), force device ON (override schedule)."
       default: 5.0
       selector:
         number:
@@ -45,33 +45,87 @@ blueprint:
           step: 0.1
     turn_on_actions:
       name: Turn ON Actions
-      description: "Actions to run when turning the device ON (e.g., turn on heater switch)."
+      description: "Action(s) to run when turning the device ON (e.g., switch on the heater)."
       selector:
         action: {}
     turn_off_actions:
       name: Turn OFF Actions
-      description: "Actions to run when turning the device OFF."
+      description: "Action(s) to run when turning the device OFF."
       selector:
         action: {}
 
 variables:
-  sensor_entity: !input nordpool_sensor        # The Nord Pool sensor entity (for convenience in templates)
-  hours_on: !input expensive_hours_on          # Number of expensive hours to turn on
-  max_off: !input max_off_hours                # Max allowed consecutive off hours
-  high_thr_price: !input always_on_price       # High price threshold to always turn on
+  sensor_entity: !input nordpool_sensor
+  hours_on: !input expensive_hours_on
+  max_off: !input max_off_hours
+  high_thr_price: !input always_on_price
 
 trigger:
   - platform: state
-    entity_id: !input nordpool_sensor          # Trigger whenever the Nord Pool price sensor updates
+    entity_id: !input nordpool_sensor    # Trigger whenever the Nord Pool sensor updates
 
 action:
-  # 1. Calculate the threshold price and check off-hour limit using the sensor's attributes
   - variables:
       price_list: >-
-        {{ state_attr(sensor_entity, 'today') | list }}   {# List of today's prices from the sensor attribute #}
-      total_count: >-
-        {{ price_list | length if price_list is not none else 0 }}
-      sorted_prices: >-
-        {{ price_list | sort if price_list is not none else [] }} 
-      # Determine the price that separates "expensive" hours from "cheap" hours.
-      # If hours_on = X, threshold_price = the X-th most expensive price (i.e., (24-X)th cheapest).
+        {{ state_attr(sensor_entity, 'today') | list }}
+      total_count: "{{ price_list | length if price_list is not none else 0 }}"
+      sorted_prices: "{{ price_list | sort if price_list is not none else [] }}"
+      # Determine how many price intervals per hour (1 for hourly data, 4 for 15-min data, etc.)
+      per_hour: >-
+        {% if total_count | int >= 24 %}
+          {{ total_count | int // 24 }}
+        {% else %}
+          {{ 1 }}
+        {% endif %}
+      # Calculate the threshold price that separates the 'expensive' hours.
+      threshold_price: >-
+        {% set exp_hours = hours_on | int %}
+        {% if total_count | int == 0 %}
+          {{ 999 }}  {# No data, dummy high threshold #}
+        {% elif exp_hours >= total_count | int %}
+          {{ sorted_prices[0] }}  {# All intervals ON (threshold = lowest price) #}
+        {% elif exp_hours <= 0 %}
+          {{ sorted_prices[-1] + 0.0001 }}  {# No hours ON (threshold just above highest price) #}
+        {% else %}
+          {% set thr_index = total_count | int - exp_hours * (per_hour | int) %}
+          {% if thr_index < 0 %}{% set thr_index = 0 %}{% endif %}
+          {{ sorted_prices[thr_index] }}
+        {% endif %}
+      # Count how many upcoming intervals from now would be OFF (below threshold) consecutively
+      off_run_count: >-
+        {% set off_count = 0 %}
+        {% if price_list is not none and total_count | int > 0 %}
+          {% set current_price = states(sensor_entity) | float(0) %}
+          {% if current_price in price_list %}
+            {% set current_index = price_list.index(current_price) %}
+          {% else %}
+            {% if total_count | int <= 24 %}
+              {% set current_index = now().hour %}
+            {% else %}
+              {% set current_index = now().hour * (per_hour | int) + (now().minute // (60 // (per_hour | int))) %}
+            {% endif %}
+          {% endif %}
+          {% for i in range(current_index, total_count | int) %}
+            {% if price_list[i] < (threshold_price | float(0)) %}
+              {% set off_count = off_count + 1 %}
+            {% else %}
+              {% break %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {{ off_count }}
+      current_price: "{{ states(sensor_entity) | float(0) }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ 
+                (current_price >= (high_thr_price | float(0))) or        /* Always ON if above high price threshold */
+                (current_price >= (threshold_price | float(0))) or       /* OR if current price is in the expensive-hours range */
+                ((off_run_count | int) > (max_off | int) * (per_hour | int))  /* OR if OFF period would exceed max_off_hours */
+              }}
+        sequence: !input turn_on_actions
+    default: !input turn_off_actions
+
+mode: single
