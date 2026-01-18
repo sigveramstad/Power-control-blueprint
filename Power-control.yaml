@@ -2,8 +2,8 @@ blueprint:
   name: Nordpool price based on (most expensive hours)
   description: >
     Turns devices ON during the most expensive Nordpool hours.
-    Allows selecting grid area, number of expensive hours,
-    always-on price, and turn on/off actions.
+    Select grid area, number of expensive hours, always-on price,
+    and turn on/off actions.
   domain: automation
 
   input:
@@ -56,13 +56,13 @@ variables:
   always_on_price_var: !input always_on_price
 
   prices: "{{ state_attr(grid_area_var, 'today') | list }}"
-  idx: "{{ now().hour }}"
-  price: "{{ prices[idx] | float if idx < prices | length else prices[-1] | float }}"
+  current_hour: "{{ now().hour }}"
+  price: "{{ prices[current_hour] | float if current_hour < prices | length else prices[-1] | float }}"
 
   # Sort prices from most expensive to cheapest
   sorted_prices_desc: "{{ prices | sort(reverse=true) }}"
 
-  # Rank of current hour among most expensive hours
+  # Rank of current hour among the most expensive hours
   expensive_rank: "{{ sorted_prices_desc.index(price) + 1 }}"
 
   condition_always_on: "{{ price >= always_on_price_var | float }}"
