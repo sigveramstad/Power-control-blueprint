@@ -1,53 +1,102 @@
 blueprint:
-  name: "Nordpool Price – Expensive Hours (Reversed Logic)"
-  description: >
-    Turn a device (e.g., water heater) **ON** during the most expensive Nord Pool price hours 
-    and **OFF** during the cheapest hours. Configurable number of expensive hours per day to run, 
-    with a safeguard on max consecutive off-hours. Also includes optional high/low price thresholds 
-    to always force ON or OFF like in the original blueprint.
+  name: Nordpool price based on off
+  description: This blueprints uses the nordpool integration and lets you turn on
+    devices on the chepest hours and make automations based on that information.
   domain: automation
-
   input:
-    nordpool_sensor:
-      name: Nord Pool Price Sensor
-      description: "Select your Nord Pool price sensor entity (dropdown)."
+    grid_area:
+      name: Grid area sensor
+      description: This is your grid area sensor
       selector:
         entity:
-          domain: sensor
+          domain:
+          - sensor
           integration: nordpool
-    expensive_hours_on:
-      name: Expensive Hours On (per day)
-      description: "Number of highest-priced hours per day to turn the device ON."
+          multiple: false
+    hour_rank:
+      name: Hours on
+      description: Set the minimum of hours per day that the devices should be on
       default: 12
       selector:
         number:
-          min: 1
-          max: 24
+          min: 0.0
+          max: 24.0
           mode: slider
-          step: 1
-    max_off_hours:
-      name: Max Consecutive OFF Hours
-      description: "Max hours the device can stay OFF in a row before being forced ON."
-      default: 5
-      selector:
-        number:
-          min: 1
-          max: 24
-          mode: slider
-          step: 1
-    always_on_price:
-      name: Always ON Price Threshold
-      description: "If price exceeds this value (currency/kWh), force device ON (override schedule)."
-      default: 5.0
+          step: 1.0
+    hour_ratio:
+      name: Hour percent
+      description: Max percent between minimum and maximum price of the day to turn
+        on devices
+      default: 50
       selector:
         number:
           min: 0.0
-          max: 20.0
-          step: 0.1
-    always_off_price:
-      name: Always OFF Price Threshold
-      description: "If price falls below this value, force device OFF (override max off-hour rule)."
+          max: 100.0
+          mode: slider
+          step: 5.0
+    allways_on:
+      name: Always on price
+      description: if the price is below this the device is always on (ignoring Hours
+        on and Hour percent)
       default: 0.0
       selector:
         number:
           min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    allways_off:
+      name: Always off price
+      description: if the price is above this the device is always off (ignoring Hours
+        on and Hour percent)
+      default: 20
+      selector:
+        number:
+          min: 0.0
+          max: 20.0
+          mode: slider
+          step: 0.1
+    turnon:
+      name: TurnOn
+      description: Actions to run to turn on devices
+      default: []
+      selector:
+        action: {}
+    turnoff:
+      name: TurnOff
+      description: Actions to run to turn off devices
+      default: []
+      selector:
+        action: {}
+  source_url: https://github.com/MikaelUlvesjo/homeassistant/blob/main/nordpool_blueprint.yaml
+variables:
+  grid_area_var: !input grid_area
+  hour_rank_input: !input hour_rank
+  hour_rank_var: "{{ (hour_rank_input | float * 4) | int }}"
+  hour_ratio_var: !input hour_ratio
+  allways_on_var: !input allways_on
+  allways_off_var: !input allways_off
+  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
+  prices: "{{ state_attr(grid_area_var, 'today') | list }}"
+  price: "{{ prices[idx] | float if idx < (prices | length) else prices[-1] | float }}"
+  sorted_prices: "{{ prices | sort }}"
+  above_low: "{{ price - sorted_prices[0] }}"
+  diff: "{{ sorted_prices[-1] - sorted_prices[0] }}"
+  ratio: "{{ ( (above_low / diff) * 100 ) | round if diff > 0 else 0 }}"
+  rank: "{{ sorted_prices.index(price) + 1 }}"
+  condition_allways_on_price: "{{ price <= allways_on_var | float }}"
+  condition_price_ratio: "{{ ratio | int <= hour_ratio_var | int }}"
+  condition_rank_cheapest_hours: "{{ rank | int <= hour_rank_var | int }}"
+  seton: "{{ condition_allways_on_price or condition_price_ratio or condition_rank_cheapest_hours }}"
+  result: "{{ price < allways_off_var and seton }}"
+trigger:
+  - platform: time_pattern
+    minutes: "/15"
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ result }}"
+        sequence: !input turnon
+    default: !input turnoff
+mode: single
