@@ -1,3 +1,4 @@
+
 blueprint:
   name: Nordpool price based on off
   description: This blueprints uses the nordpool integration and lets you turn on
@@ -13,6 +14,26 @@ blueprint:
           - sensor
           integration: nordpool
           multiple: false
+    start_minute:
+      name: Start minute
+      description: Set the minute in hour to check if the price is low
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 59.0
+          mode: slider
+          step: 1.0
+    end_minute:
+      name: End minute
+      description: If this is different than Start minute the turn on action will be performed by if price is lower than allways_off and on the end minute the turnoff action will be performed if expencive hour
+      default: 0
+      selector:
+        number:
+          min: 0.0
+          max: 59.0
+          mode: slider
+          step: 1.0
     hour_rank:
       name: Hours on
       description: Set the minimum of hours per day that the devices should be on
@@ -36,8 +57,7 @@ blueprint:
           step: 5.0
     allways_on:
       name: Always on price
-      description: if the price is below this the device is always on (ignoring Hours
-        on and Hour percent)
+      description: if the price is below this the device is always on (ignoring Hours on and Hour percent)
       default: 0.0
       selector:
         number:
@@ -47,8 +67,7 @@ blueprint:
           step: 0.1
     allways_off:
       name: Always off price
-      description: if the price is above this the device is always off (ignoring Hours
-        on and Hour percent)
+      description: if the price is above this the device is always off (ignoring Hours on and Hour percent)
       default: 20
       selector:
         number:
@@ -76,8 +95,10 @@ variables:
   hour_ratio_var: !input hour_ratio
   allways_on_var: !input allways_on
   allways_off_var: !input allways_off
-  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
+  start_minute_var: !input start_minute
+  end_minute_var: !input end_minute
   prices: "{{ state_attr(grid_area_var, 'today') | list }}"
+  idx: "{{ (now().hour * 4) + (now().minute // 15) }}"
   price: "{{ prices[idx] | float if idx < (prices | length) else prices[-1] | float }}"
   sorted_prices: "{{ prices | sort }}"
   above_low: "{{ price - sorted_prices[0] }}"
@@ -91,7 +112,9 @@ variables:
   result: "{{ price < allways_off_var and seton }}"
 trigger:
   - platform: time_pattern
-    minutes: "/15"
+    minutes: !input start_minute
+  - platform: time_pattern
+    minutes: !input end_minute
 action:
   - choose:
       - conditions:
