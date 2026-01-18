@@ -1,157 +1,83 @@
 blueprint:
-  name: Nordpool price based on off during a period
-  description: This blueprints uses the nordpool integration and lets you turn on devices on the chepest hours in a row within a timespan and make automations based on that information.
+  name: Nordpool price based on (most expensive hours)
+  description: >
+    Turns devices ON during the most expensive Nordpool hours.
+    Allows selecting grid area, number of expensive hours,
+    always-on price, and turn on/off actions.
   domain: automation
+
   input:
     grid_area:
       name: Grid area sensor
-      description: This is your grid area sensor
+      description: Nordpool price sensor for your grid area
       selector:
         entity:
-          domain:
-          - sensor
+          domain: sensor
           integration: nordpool
           multiple: false
-    start_hour:
-      name: Start hour
-      description: Set the hour to start to check for time period with low prices
-      default: 22
-      selector:
-        number:
-          min: 0.0
-          max: 23.0
-          mode: slider
-          step: 1.0
-    end_hour:
-      name: End hour
-      description: Set the hour to end the check for time period with low prices
+
+    hours_on:
+      name: Hours ON (most expensive)
+      description: Number of most expensive hours per day when device should be ON
       default: 6
       selector:
         number:
-          min: 0.0
-          max: 23.0
+          min: 0
+          max: 24
+          step: 1
           mode: slider
-          step: 1.0
-    on_hours:
-      name: Hours on
-      description: Set the number of hours per day that the devices should be on
-      default: 3
+
+    always_on_price:
+      name: Always ON price
+      description: If price is above this value, device is always ON
+      default: 0.0
       selector:
         number:
-          min: 0.0
-          max: 24.0
+          min: 0
+          max: 20
+          step: 0.1
           mode: slider
-          step: 1.0
-    turnon:
-      name: TurnOn
-      description: Actions to run to turn on devices
-      default: []
+
+    turn_on:
+      name: Turn ON actions
       selector:
         action: {}
-    turnoff:
-      name: TurnOff
-      description: Actions to run to turn off devices
-      default: []
+
+    turn_off:
+      name: Turn OFF actions
       selector:
         action: {}
+
+mode: single
+
 variables:
   grid_area_var: !input grid_area
-  start_hour_var: !input start_hour
-  end_hour_var: !input end_hour
-  on_hours_var: !input on_hours
+  hours_on_var: !input hours_on
+  always_on_price_var: !input always_on_price
+
+  prices: "{{ state_attr(grid_area_var, 'today') | list }}"
+  idx: "{{ now().hour }}"
+  price: "{{ prices[idx] | float if idx < prices | length else prices[-1] | float }}"
+
+  # Sort prices from most expensive to cheapest
+  sorted_prices_desc: "{{ prices | sort(reverse=true) }}"
+
+  # Rank of current hour among most expensive hours
+  expensive_rank: "{{ sorted_prices_desc.index(price) + 1 }}"
+
+  condition_always_on: "{{ price >= always_on_price_var | float }}"
+  condition_expensive_hour: "{{ expensive_rank <= hours_on_var | int }}"
+
+  result_on: "{{ condition_always_on or condition_expensive_hour }}"
+
 trigger:
   - platform: time_pattern
     minutes: 0
+
 action:
-- choose:
-  - conditions:
-    - condition: template
-      value_template: >-
-        {% set current_hour = now().hour %}
-        {% set offset = 0 %}
-
-        {% if current_hour == 0 %}
-          {% if states('input_text.prices') != '' %}
-            - service: input_text.set_value
-              data_template:
-                entity_id: input_text.yesterdays_prices
-                value: "{{ states('input_text.prices') }}"
-          {% endif %}
-          - service: input_text.set_value
-            data_template:
-              entity_id: input_text.prices
-              value: ''
-          - service: input_text.set_value
-            data_template:
-              entity_id: input_text.tomorrow_prices
-              value: ''
-        {% endif %}
-
-        {% set yesterdays_prices = [] %}
-        {% if current_hour > end_hour_var %}
-          - service: input_text.set_value
-            data_template:
-              entity_id: input_text.yesterdays_prices
-              value: ''
-        {% elif states('input_text.yesterdays_prices') != '' %}
-          {% set offset = 24 %}
-          {% set yesterdays_prices = states('input_text.yesterdays_prices') | from_json %}
-        {% endif %}
-
-        {% set prices = states('input_text.prices') | default(state_attr(grid_area_var, 'today') | list) | from_json %}
-        {% set tomorrow_prices = [] %}
-        {% if current_hour >= 14 and states('input_text.tomorrow_prices') == '' %}
-          {% set tomorrow_prices = state_attr(grid_area_var, 'tomorrow') | list %}
-          - service: input_text.set_value
-            data_template:
-              entity_id: input_text.tomorrow_prices
-              value: "{{ tomorrow_prices | to_json }}"
-        {% elif states('input_text.tomorrow_prices') != '' %}
-          {% set tomorrow_prices = states('input_text.tomorrow_prices') | from_json %}
-        {% endif %}
-
-        {% set is_between = false %}
-        {% set hours_in = 0 %}
-        {% if start_hour_var <= end_hour_var %}
-          {% set is_between = start_hour_var <= current_hour <= end_hour_var %}
-          {% set hours_in = current_hour - start_hour_var %}
-        {% else %}
-          {% set is_between = start_hour_var <= current_hour or current_hour <= end_hour_var %}
-          {% set hours_in = (24 - start_hour_var) + current_hour %}
-        {% endif %}
-
-        {% set seton = false %}
-        {% if is_between %}
-          {% set all_prices = yesterdays_prices + prices + tomorrow_prices %}
-          {% if start_hour_var <= end_hour_var %}
-            {% set used_prices = all_prices[start_hour_var + offset:end_hour_var + offset + 1] %}
-          {% else %}
-            {% set used_prices = all_prices[end_hour_var:start_hour_var + 1 + offset] %}
-          {% endif %}
-
-          {% set new_ranks = [] %}
-          {% set sorted_used_prices = used_prices | sort %}
-          {% for i in range(used_prices | length - on_hours_var) %}
-            {% set rank = 0 %}
-            {% for j in range(on_hours_var) %}
-              {% set rank = rank + sorted_used_prices.index(used_prices[i+j]) + 1 %}
-            {% endfor %}
-            {% set new_ranks = new_ranks + [rank] %}
-          {% endfor %}
-
-          {% set lowest_rank = new_ranks | sort | first %}
-          {% set final_ranks = [] %}
-          {% for r in new_ranks %}
-            {% if r == lowest_rank %}
-              {% for j in range(on_hours_var) %}
-                {% set final_ranks = final_ranks + [1] %}
-              {% endfor %}
-            {% else %}
-              {% set final_ranks = final_ranks + [2] %}
-            {% endif %}
-          {% endfor %}
-          {% set seton = final_ranks[hours_in] == 1 %}
-        {% endif %}
-        {{ seton }}
-    sequence: !input turnon
-  default: !input turnoff
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ result_on }}"
+        sequence: !input turn_on
+    default: !input turn_off
